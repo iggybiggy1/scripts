@@ -1,0 +1,2 @@
+Zmiana html w pdf :
+for f in *.html; do weasyprint "$f" "${f%.html}.pdf"; done
