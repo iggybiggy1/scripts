@@ -285,15 +285,6 @@ def extract_port_from_line(line: str, tag: Optional[str] = None) -> Optional[str
 # ---------------- ARTIFACT_PATTERNS ----------------
 ARTIFACT_PATTERNS = [
     (
-        re.compile(r'\b(CVE-\d{4}-\d{4,7})\b', re.I),
-        "Wykryto podatnosc ({0}) -> Zalecamy natychmiastową weryfikację i aktualizację komponentu. Brak reakcji może prowadzić do RCE, wycieku danych lub eskalacji uprawnień.",
-        lambda ln: (
-            (lambda u: u.group(1) if u else None)(re.search(r'(https?://[^\s\[\]"]+)', ln))
-            or (lambda p: p.group(1) if p else None)(re.search(r'([a-z0-9\.-]+\.[a-z]{2,}[^\s\[\]"]*/[^\s\[\]"]+)', ln, re.I))
-            or None
-        )
-    ),
-    (
         re.compile(r'^(?!.*CVE-).*?(wp-json[^ \t\n\r]*users|enumeration.*users|wordpress.*enumeration)', re.I),
         "WordPress (enumeracja uzytkownikow) -> zablokowanie mozliwosci enumeracji kont przez URL. Brak tej zmiany umozliwia atakujacemu poznanie kont uzytkownikow, ulatwiajac ataki brute-force lub phishing.",
         lambda ln: (
@@ -336,9 +327,6 @@ ARTIFACT_PATTERNS = [
     (re.compile(r'same-?site|same site|same_site', re.I),
      "Brak ustawienia ciasteczka SameSite -> wlaczenie SameSite=Strict. Brak zmiany umozliwia ataki typu CSRF.",
      lambda ln: extract_domain_from_line(ln)),
-    (re.compile(r'critical|high', re.I),
-     "Potencjalnie krytyczne CVE -> natychmiastowe sprawdzenie szczegolow. Brak dzialania moze prowadzic do RCE, wycieku danych lub eskalacji uprawnien.",
-     lambda ln: extract_resource_from_line(ln)),
     (re.compile(r'\[phpmyadmin\]', re.I),
      "Dostepny PhpMyAdmin -> ograniczenie dostepu tylko do zaufanych IP i wymuszenie uwierzytelniania. Brak zmiany umozliwia atak brute-force i przejecie baz danych.",
      None),
@@ -562,13 +550,85 @@ def parse_cve_html_file(path: str) -> list:
 
     host_name = os.path.splitext(os.path.basename(path))[0].lower()
 
+    # Metadata used only for reliable assignment of CVE-folder reports to roots.
+    # Nothing from the source report is removed because of these fields.
+    source_domains = sorted(set(
+        d.lower().rstrip(".")
+        for d in FQDN_RE.findall(clean_text)
+        if d
+    ))
+    source_ips = sorted(set(IPV4_RE.findall(clean_text)))
+
     return [{
         "ip": None,
         "host": host_name,
         "services": None,
         "cves": [],
-        "recs": [clean_text]
+        "recs": [clean_text],
+        "source_domains": source_domains,
+        "source_ips": source_ips,
+        "source_file": os.path.basename(path),
     }]
+
+
+def _entry_full_text_for_mapping(entry: Dict[str, Any]) -> str:
+    """Lossless text used only to decide which root owns a CVE-folder report."""
+    parts: List[str] = []
+    parts.append(str(entry.get("host") or ""))
+    parts.append(str(entry.get("source_file") or ""))
+    for value in entry.get("source_domains") or []:
+        parts.append(str(value))
+    for value in entry.get("source_ips") or []:
+        parts.append(str(value))
+    for value in entry.get("recs") or []:
+        parts.append(str(value))
+    return "\n".join(parts)
+
+
+def _entry_mentions_root(entry: Dict[str, Any], root: str) -> bool:
+    """
+    True when the report content explicitly references root or one of its subdomains.
+    This fixes CVE HTML files whose filename does not contain the scanned domain.
+    """
+    root = (root or "").strip().lower().rstrip(".")
+    if not root:
+        return False
+
+    host = (entry.get("host") or "").strip().lower().rstrip(".")
+    if host == root or host.endswith("." + root):
+        return True
+
+    for domain in entry.get("source_domains") or []:
+        d = str(domain).strip().lower().rstrip(".")
+        if d == root or d.endswith("." + root):
+            return True
+
+    text = _entry_full_text_for_mapping(entry).lower()
+    pattern = re.compile(
+        r"(?<![a-z0-9.-])(?:[a-z0-9-]+\.)*" + re.escape(root) + r"(?=$|[^a-z0-9.-])",
+        re.I,
+    )
+    return bool(pattern.search(text))
+
+
+def _dedupe_cve_source_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate identical CVE-folder report payloads without dropping unique findings."""
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for entry in entries:
+        key = (
+            (entry.get("host") or "").lower(),
+            tuple(entry.get("cves") or []),
+            tuple(entry.get("recs") or []),
+            tuple(entry.get("source_domains") or []),
+            entry.get("source_file") or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
 
 # ------------------ CVE helpers ------------------
 def normalize_services_str(services_str: Optional[str]) -> Optional[str]:
@@ -961,30 +1021,41 @@ def main():
                 entries = [e for e in entries if not is_example_entry(e)]
 
             base = os.path.splitext(fname)[0].lower()
-            matched = False
+            matched_roots = set()
 
-            # 1) ORIGINAL domain-root matching (unchanged)
+            # 1) Filename-based mapping remains supported.
             for root in roots:
                 if base == root or base.endswith("." + root) or root in base:
                     cve_by_root[root].extend(entries)
-                    matched = True
-            if not matched:
-                for ent in entries:
-                    host = (ent.get('host') or "").lower()
-                    for root in roots:
-                        if host.endswith("." + root) or host == root:
-                            cve_by_root[root].append(ent)
-                            matched = True
+                    matched_roots.add(root)
 
-            # 2) NEW: If not matched, try map IPv4 filename to best IP range present
-            if not matched and is_ipv4(base) and iprange_nets:
+            # 2) CONTENT-AWARE mapping.
+            #    Every entry is checked for domains present inside the CVE HTML itself.
+            #    This is the critical fix for files named e.g. report.html / 12345.html.
+            for root in roots:
+                matching_entries = [e for e in entries if _entry_mentions_root(e, root)]
+                if matching_entries:
+                    cve_by_root[root].extend(matching_entries)
+                    matched_roots.add(root)
+
+            # 3) IPv4 filename -> known IP-range bucket.
+            if not matched_roots and is_ipv4(base) and iprange_nets:
                 cidr = best_matching_iprange(base, iprange_nets)
                 if cidr:
                     cve_by_root[cidr].extend(entries)
-                    matched = True
+                    matched_roots.add(cidr)
 
-            # 3) ORIGINAL fallback: unmapped
-            if not matched:
+            # 4) Lossless single-entity fallback.
+            #    When this run contains one root only, ALL reports from its CVE folder
+            #    belong to that entity and must never disappear merely because the
+            #    filename/content format was unexpected.
+            if not matched_roots and len(roots) == 1:
+                cve_by_root[roots[0]].extend(entries)
+                matched_roots.add(roots[0])
+
+            # 5) Multi-root ambiguous fallback:
+            #    preserve the data explicitly instead of silently dropping it.
+            if not matched_roots:
                 cve_by_root["__unmapped__"].extend(entries)
 
     out_dir = "sparsowane_raporty"
@@ -1016,6 +1087,12 @@ def main():
         artifacts_by_msg: Dict[str, List[Any]] = {}
         for host, hinfo in hosts_info.items():
             for ln in hinfo.get('raw_findings', []):
+                # CVE findings are rendered only in the standard CVEs section.
+                # This prevents duplicate blocks such as "Wykryto podatnosc"
+                # or plugin-specific duplicates for the same CVE.
+                if re.search(r'\bCVE-\d{4}-\d{4,7}\b', ln, re.I):
+                    continue
+
                 for patt, msg, func in ARTIFACT_PATTERNS:
                     try:
                         m = patt.search(ln)
@@ -1102,7 +1179,7 @@ def main():
             agg_recs.append(SERVICE_RECOMMENDATIONS.get('postgresql'))
 
         if cve_mode:
-            cve_entries = cve_by_root.get(root, [])[:]
+            cve_entries = _dedupe_cve_source_entries(cve_by_root.get(root, [])[:])
             for ent in cve_entries:
                 if ent.get('cves'):
                     ent['cves'] = dedupe_cves_list(ent['cves'])
@@ -1243,7 +1320,7 @@ def main():
 
         # CVE entries assigned to this CIDR (from CVE HTML mapping stage)
         if cve_mode:
-            cve_entries = cve_by_root.get(cidr, [])[:]
+            cve_entries = _dedupe_cve_source_entries(cve_by_root.get(cidr, [])[:])
             for ent in cve_entries:
                 if ent.get('cves'):
                     ent['cves'] = dedupe_cves_list(ent['cves'])
