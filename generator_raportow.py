@@ -101,7 +101,7 @@ def main():
         print(f"ℹ️ Wykryto istniejący plik nuclei_grouped.txt: {nuclei_grouped}")
         print("⏭️ Pomijam krok parsowania nuclei_scan.txt i przechodzę dalej.\n")
     else:
-        nuclei_parser = os.path.join(scripts_folder, "nuclei_parser_merged.py")
+        nuclei_parser = os.path.join(scripts_folder, "nuclei_parser_merged_improved.py")
         if not os.path.isfile(nuclei_parser):
             print(f"❌ Brak skryptu {nuclei_parser}")
             sys.exit(1)

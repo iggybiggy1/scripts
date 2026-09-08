@@ -42,10 +42,92 @@ SPECIFIC_ZALECAMY = (
     "w innych, publicznie udostępnionych przez Państwa systemach"
 )
 
+WP_OUTDATED_RECOMMENDATION = (
+    "Jeśli strona nie jest już używana, rekomendujemy jej wyłączenie, aby wyeliminować "
+    "ryzyko ataku przy użyciu znanych podatności w starszych wersjach wtyczek lub szablonów. "
+    "Jeśli zaś jest używana, rekomendujemy korzystanie z mechanizmu automatycznej aktualizacji "
+    "systemu WordPress oraz wtyczek."
+)
+
+JOOMLA_OUTDATED_RECOMMENDATION = (
+    "Jeśli strona nie jest już używana, rekomendujemy jej wyłączenie, aby wyeliminować "
+    "ryzyko ataku przy użyciu znanych podatności w starszych wersjach systemu Joomla. "
+    "Jeśli zaś jest używana, rekomendujemy regularną aktualizację systemu oraz używanych rozszerzeń."
+)
+
 ENDING_LINES = [
     "Jeżeli któreś z podatności nie dotyczą podmiotu, prosimy o informację zwrotną wraz z wyjaśnieniem.",
     "Prosimy pamiętać, że skanowanie jest rozłożone w czasie.",
 ]
+
+
+GREETING_LINE_1 = "Szanowni Państwo,"
+GREETING_TEMPLATE = (
+    "w ramach analizy bezpieczeństwa teleinformatycznego w Państwa domenie {domain} "
+    "zidentyfikowaliśmy obiekty, których wersja lub konfiguracja posiada znane podatności."
+)
+
+MAIL_SECURITY_HEADER = (
+    "Następujące domeny nie mają poprawnie skonfigurowanych mechanizmów bezpieczeństwa "
+    "poczty elektronicznej:"
+)
+
+
+def _remove_all_greeting_blocks(text: str) -> str:
+    """
+    Removes every duplicated greeting block from the report body.
+
+    Supported variants:
+      Szanowni Państwo,
+      w ramach analizy ... w Państwa domenie X ... znane podatności.
+
+    Also tolerates optional bullets/dashes and whitespace introduced by previous parsers.
+    """
+    pattern = re.compile(
+        r"(?ims)"
+        r"^[ \t]*(?:[-•]\s*)?Szanowni Państwo,\s*"
+        r"(?:\r?\n|\s)+"
+        r"[ \t]*(?:[-•]\s*)?"
+        r"w ramach analizy bezpieczeństwa teleinformatycznego w Państwa domenie\s+"
+        r"[^\r\n]+?"
+        r"zidentyfikowaliśmy obiekty, których wersja lub konfiguracja posiada znane podatności\.\s*"
+    )
+    return pattern.sub("", text)
+
+
+def _prepend_single_greeting(html_lines, domain: str):
+    """
+    Ensures exactly one greeting at the very top of the generated HTML body.
+    """
+    domain = (domain or "").strip()
+    if not domain:
+        return html_lines
+
+    greeting_2 = GREETING_TEMPLATE.format(domain=domain)
+
+    # Remove any greeting residues already rendered into HTML lines.
+    filtered = []
+    skip_next = False
+    for ln in html_lines:
+        plain = re.sub(r"<[^>]+>", "", html.unescape(ln or "")).strip()
+        if plain == GREETING_LINE_1:
+            skip_next = True
+            continue
+        if skip_next and (
+            plain.startswith("w ramach analizy bezpieczeństwa teleinformatycznego")
+            and "zidentyfikowaliśmy obiekty" in plain
+        ):
+            skip_next = False
+            continue
+        skip_next = False
+        filtered.append(ln)
+
+    prefix = [
+        f"<p>{escape_and_highlight_vuln(GREETING_LINE_1)}</p>",
+        f"<p>{escape_and_highlight_vuln(greeting_2)}</p>",
+        "<br>",
+    ]
+    return prefix + filtered
 
 UNWANTED_RECOMMENDATION_BLOCK = """Rekomendacje / uwagi:
 
@@ -65,17 +147,112 @@ def escape_and_highlight_vuln(s: str) -> str:
 
 def parse_artemis_blocks(lines, idx, html_lines):
     """
-    Parsuje fragmenty typu Artemis i zamienia je na HTML.
-    Wszystkie wpisy w <p>, brak <ul>/<li>.
+    Parsuje bloki Artemis/CVE-report bez utraty wieloliniowych szczegółów.
+
+    Ważne:
+    - szczegółowe nagłówki są rozpoznawane PRZED regułami ogólnymi,
+    - rekomendacje należące do findingu są zachowywane,
+    - linie zawierające dwukropek (np. "AD domain name:") nie kończą bloku,
+    - blok kończy się dopiero na następnym znanym findingu lub sekcji raportu.
     """
     start_idx = idx
+
+    FINDING_HEADERS = (
+        "Pod następującymi adresami znajdują się strony z nieaktualnymi wtyczkami lub szablonami WordPress:",
+        "Pod poniższymi adresami znajdują się strony z nieaktualnymi wtyczkami lub szablonami WordPress:",
+        "Pod następującymi adresami znajdują się nieaktualne wersje systemu Joomla:",
+        "Pod poniższymi adresami znajdują się nieaktualne wersje systemu Joomla:",
+        "Następujące adresy zwracają certyfikaty SSL/TLS wystawione na niepoprawne domeny:",
+        "Certyfikaty SSL/TLS pod następującymi adresami nie są podpisane przez zaufane centrum certyfikacji:",
+        "Certyfikaty SSL/TLS pod następującymi adresami wygasły:",
+        "Pod następującymi adresami znajdują się pliki udostępniające informacje o konfiguracji serwera:",
+        "Pod poniższymi adresami znajdują się pliki udostępniające informacje o konfiguracji serwera:",
+        "Wykryto konfigurację serwerów pozwalającą na listing plików",
+        "Poniższe końcówki udostępniają uwierzytelnianie NTLM przez HTTP(S)",
+        "Następujące końcówki udostępniają uwierzytelnianie NTLM przez HTTP(S)",
+        "Wykryto stronę phpinfo()",
+        "Wykryto, że następujące nagłówki HTTP",
+        "Następujące domeny nie mają poprawnie skonfigurowanych mechanizmów weryfikacji nadawcy wiadomości e-mail:",
+        MAIL_SECURITY_HEADER,
+        "Wykryto ustawienia stwarzające ryzyko przejęcia domen",
+        "Następujące serwery mają otwarty port bazy danych:",
+        "Nie znaleziono poprawnego rekordu DMARC",
+        "Pod następującymi adresami występuje podatność SQL Injection",
+        "Następujące adresy nie przekierowują z http:// na https://",
+        "Poniższe adresy zawierają zasoby takie jak panele logowania, narzędzia analityczne, panele administracyjne itp",
+        "Nie znaleziono dyrektywy '~all' lub '-all' w rekordzie SPF.",
+        "Rekord SPF",
+        "Problem z mechanizmem SPF:",
+    )
 
     def add_header(header_text):
         html_lines.append("<br>")
         html_lines.append(f"<p><strong>{escape_and_highlight_vuln(header_text)}</strong></p>")
 
+    def normalized(s: str) -> str:
+        return (s or "").strip().lstrip("- ").strip()
+
+    def is_new_finding_header(s: str) -> bool:
+        x = normalized(s)
+        if not x:
+            return False
+        if any(x.startswith(h) for h in FINDING_HEADERS):
+            return True
+        if "Polityka DMARC jest ustawiona na 'none'" in x:
+            return True
+        # Ogólny fallback dla starych wariantów Artemis. Nie może wyprzedzać
+        # szczegółowych warunków powyżej.
+        return bool(re.match(r"^Pod (?:następującymi|poniższymi) adresami znajdują się\b", x, re.I))
+
+    def is_report_boundary(s: str) -> bool:
+        x = normalized(s)
+        if not x:
+            return False
+        return (
+            x.startswith("IP:")
+            or bool(IP_IN_PARENS_LINE_RE.match(x))
+            or x.startswith("Widoczne serwisy:")
+            or x.startswith("CVEs:")
+            or x.startswith("Domeny z brakującymi nagłówkami:")
+            or x.startswith("Spis treści:")
+            or bool(re.match(r"^\d+\.\s", x))
+            or x.startswith("Rekomendacje / uwagi:")
+            or x.startswith("Jeżeli któreś z podatności nie dotyczą podmiotu")
+            or x.startswith("Prosimy pamiętać, że skanowanie jest rozłożone w czasie")
+            or x == PGP_NOTICE
+        )
+
+    def consume_block(header_text: str, start: int):
+        add_header(header_text)
+        j = start + 1
+        while j < len(lines):
+            raw = lines[j]
+            nxt = normalized(raw)
+            if not nxt:
+                j += 1
+                continue
+            if is_report_boundary(raw):
+                break
+            if is_new_finding_header(raw):
+                break
+
+            if nxt in (WP_OUTDATED_RECOMMENDATION, JOOMLA_OUTDATED_RECOMMENDATION):
+                html_lines.append("<br>")
+                html_lines.append(
+                    f"<p><strong>{escape_and_highlight_vuln(nxt)}</strong></p>"
+                )
+                j += 1
+                continue
+
+            # LOSSLESS FALLBACK INSIDE A KNOWN CVE/Artemis FINDING:
+            # every non-boundary line is emitted, even if the field/category
+            # was never seen before.
+            html_lines.append(f"<p>{escape_and_highlight_vuln(nxt)}</p>")
+            j += 1
+        return j
+
     while idx < len(lines):
-        line = lines[idx].strip()
+        line = normalized(lines[idx])
         if not line:
             idx += 1
             continue
@@ -91,173 +268,103 @@ def parse_artemis_blocks(lines, idx, html_lines):
             idx += 1
             continue
 
-        if re.match(r"^Pod (następującymi|poniższymi) adresami znajdują się", line):
-            add_header("Nieaktualne wersje CMS lub wtyczek:")
-            idx += 1
-            while idx < len(lines) and lines[idx].strip().startswith("https://"):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+        # --- Najpierw dokładne kategorie wymagające zachowania całego bloku ---
+        if line.startswith((
+            "Pod następującymi adresami znajdują się strony z nieaktualnymi wtyczkami lub szablonami WordPress:",
+            "Pod poniższymi adresami znajdują się strony z nieaktualnymi wtyczkami lub szablonami WordPress:",
+        )):
+            idx = consume_block(line, idx)
             continue
 
-        if line.startswith("Rekord SPF") or line.startswith("Problem z mechanizmem SPF:"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
-            continue
-
-        if line.startswith("Pod następującymi adresami znajdują się nieaktualne wersje systemu Joomla"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
-            continue
-
-        if line.startswith("Wykryto stronę phpinfo()"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
-            continue
-
-        if line.startswith("Wykryto, że następujące nagłówki HTTP"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
+        if line.startswith((
+            "Pod następującymi adresami znajdują się nieaktualne wersje systemu Joomla:",
+            "Pod poniższymi adresami znajdują się nieaktualne wersje systemu Joomla:",
+        )):
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Następujące adresy zwracają certyfikaty SSL/TLS wystawione na niepoprawne domeny:"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
-            continue
-
-        if line.lstrip("- ").startswith(
-            "Następujące domeny nie mają poprawnie skonfigurowanych mechanizmów weryfikacji nadawcy wiadomości e-mail:"
-        ):
-            clean_header = line.lstrip("- ").strip()
-            add_header(clean_header)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Certyfikaty SSL/TLS pod następującymi adresami nie są podpisane przez zaufane centrum certyfikacji:"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines) and lines[idx].strip().startswith("https://"):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
             continue
 
-        if line.startswith("Wykryto ustawienia stwarzające ryzyko przejęcia domen") or line.startswith(
-            "Wykryto ustawienia stwarzające ryzyko przejęcia domeny"
-        ):
-            add_header(line)
-            idx += 1
-            while idx < len(lines) and re.match(r"^\s*[\w.-]+\.[\w.-]+: ", lines[idx]):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+        if line.startswith("Certyfikaty SSL/TLS pod następującymi adresami wygasły:"):
+            idx = consume_block(line, idx)
             continue
 
-        if re.match(r"^Następujące serwery mają otwarty port bazy danych:", line):
-            add_header(line)
-            idx += 1
-            while idx < len(lines) and lines[idx].strip().startswith("    "):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+        if line.startswith((
+            "Pod następującymi adresami znajdują się pliki udostępniające informacje o konfiguracji serwera:",
+            "Pod poniższymi adresami znajdują się pliki udostępniające informacje o konfiguracji serwera:",
+        )):
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Wykryto konfigurację serwerów pozwalającą na listing plików"):
-            add_header(
-                "Wykryto konfigurację serwerów pozwalającą na listing plików w przynajmniej jednym katalogu. "
-                "Problem można zaobserwować np. pod adresami:"
-            )
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith((
+            "Poniższe końcówki udostępniają uwierzytelnianie NTLM przez HTTP(S)",
+            "Następujące końcówki udostępniają uwierzytelnianie NTLM przez HTTP(S)",
+        )):
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith("Wykryto stronę phpinfo()"):
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith("Wykryto, że następujące nagłówki HTTP"):
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith("Następujące domeny nie mają poprawnie skonfigurowanych mechanizmów weryfikacji nadawcy wiadomości e-mail:"):
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith(MAIL_SECURITY_HEADER):
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith("Wykryto ustawienia stwarzające ryzyko przejęcia domen"):
+            idx = consume_block(line, idx)
+            continue
+
+        if re.match(r"^Następujące serwery mają otwarty port bazy danych:", line):
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Nie znaleziono poprawnego rekordu DMARC"):
-            add_header(
-                "Nie znaleziono poprawnego rekordu DMARC. Rekomendujemy używanie wszystkich trzech mechanizmów: "
-                "SPF, DKIM i DMARC, aby zmniejszyć szansę, że sfałszowana wiadomość zostanie zaakceptowana "
-                "przez serwer odbiorcy."
-            )
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Pod następującymi adresami występuje podatność SQL Injection"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines) and lines[idx].strip().startswith("    "):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Następujące adresy nie przekierowują z http:// na https://"):
-            add_header(line)
-            idx += 1
-            while idx < len(lines) and lines[idx].strip().startswith("    http://"):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
             continue
 
-        if line.startswith(
-            "Poniższe adresy zawierają zasoby takie jak panele logowania, narzędzia analityczne, panele administracyjne itp"
-        ):
-            add_header(line)
-            idx += 1
-            while idx < len(lines):
-                next_line = lines[idx].strip()
-                if not next_line or re.match(r"^\w.*:", next_line):
-                    break
-                html_lines.append(f"<p>{escape_and_highlight_vuln(next_line)}</p>")
-                idx += 1
+        if line.startswith("Poniższe adresy zawierają zasoby takie jak panele logowania, narzędzia analityczne, panele administracyjne itp"):
+            idx = consume_block(line, idx)
             continue
 
         if line.startswith("Nie znaleziono dyrektywy '~all' lub '-all' w rekordzie SPF."):
-            add_header(line)
-            idx += 1
-            while idx < len(lines) and lines[idx].strip().startswith("    "):
-                html_lines.append(f"<p>{escape_and_highlight_vuln(lines[idx].strip())}</p>")
-                idx += 1
+            idx = consume_block(line, idx)
+            continue
+
+        if line.startswith("Rekord SPF") or line.startswith("Problem z mechanizmem SPF:"):
+            idx = consume_block(line, idx)
+            continue
+
+        # Stare/genericzne nagłówki CMS/wtyczek - dopiero na końcu, aby nie
+        # przechwytywały Joomla/phpinfo/config disclosure.
+        if re.match(r"^Pod (?:następującymi|poniższymi) adresami znajdują się\b", line, re.I):
+            idx = consume_block(line, idx)
             continue
 
         if "Jeżeli któreś z podatności nie dotyczą podmiotu" in line:
@@ -275,19 +382,12 @@ def parse_txt_content(txt_file: Path) -> str:
     content = txt_file.read_text(encoding="utf-8", errors="replace")
     content = clean_ansi(content)
 
+    # Usuń WSZYSTKIE powtórzone bloki powitalne z treści.
+    # Jeden prawidłowy blok zostanie dodany na samym początku raportu.
+    content = _remove_all_greeting_blocks(content)
+
     # Usuń SPECIFIC_ZALECAMY w środku treści
     content = re.sub(re.escape(SPECIFIC_ZALECAMY) + r"\.?\s*", "\n", content)
-
-    # Usuń niechciane bloki
-    content = re.sub(
-        r"^[ \t]*([\w.-]+\.[a-z]{2,})[ \t]*\r?\n"
-        r"-\s*Szanowni Państwo,[\s\S]*?"
-        r"w ramach analizy bezpieczeństwa teleinformatycznego w Państwa domenie[^\n]*"
-        r"zidentyfikowaliśmy obiekty, których wersja lub konfiguracja posiada znane podatności\.",
-        "",
-        content,
-        flags=re.MULTILINE | re.IGNORECASE,
-    )
 
     lines = content.splitlines()
     html_lines = []
@@ -295,6 +395,19 @@ def parse_txt_content(txt_file: Path) -> str:
     toc_done = False
     first_numbered_point_done = False
     main_domain = ""
+
+    # Ustal domenę główną do pojedynczego bloku powitalnego.
+    m_domain = re.search(
+        r"Podatności wykryte na adresie:\s*([a-z0-9.-]+)",
+        content,
+        re.I,
+    )
+    if m_domain:
+        main_domain = m_domain.group(1).strip().lower()
+    else:
+        # fallback: nazwa pliku TXT
+        main_domain = txt_file.stem.strip().lower()
+
     pgp_present_in_txt = PGP_NOTICE in content
 
     def is_section_boundary(s: str) -> bool:
@@ -342,6 +455,14 @@ def parse_txt_content(txt_file: Path) -> str:
             html_lines.append("<br>")
 
         if line == PGP_NOTICE or line == SPECIFIC_ZALECAMY:
+            idx += 1
+            continue
+
+        if line in (WP_OUTDATED_RECOMMENDATION, JOOMLA_OUTDATED_RECOMMENDATION):
+            html_lines.append("<br>")
+            html_lines.append(
+                f"<p><strong>{escape_and_highlight_vuln(line)}</strong></p>"
+            )
             idx += 1
             continue
 
@@ -538,6 +659,10 @@ def parse_txt_content(txt_file: Path) -> str:
             idx += 1
             continue
 
+        # LOSSLESS GLOBAL FALLBACK:
+        # Any line that was not recognized by a dedicated formatter is still
+        # written to the final HTML. Unknown/new CVE-folder finding types must
+        # never disappear because a regex is missing.
         html_lines.append(f"<p>{escape_and_highlight_vuln(line)}</p>")
         idx += 1
 
@@ -555,6 +680,9 @@ def parse_txt_content(txt_file: Path) -> str:
             f"<p style='color:red; font-weight:bold; text-decoration:underline;'>"
             f"{escape_and_highlight_vuln(PGP_NOTICE)}</p>"
         )
+
+    # Dokładnie jeden blok powitalny na samej górze raportu.
+    html_lines = _prepend_single_greeting(html_lines, main_domain)
 
     return "\n".join(html_lines)
 
