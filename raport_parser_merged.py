@@ -198,6 +198,61 @@ def unique_preserve(seq):
             out.append(x)
     return out
 
+
+def format_nuclei_cve_finding(line: str) -> str:
+    """
+    Convert a Nuclei CVE result to the report format expected by CVSS_parser_merged.py.
+
+    Example:
+        [CVE-2023-5561] [http] [medium] https://host/path [route="wp-json/..."]
+
+    becomes:
+        CVE-2023-5561 https://host/path [route="wp-json/..."]
+
+    Only the leading Nuclei metadata brackets directly following the CVE are
+    removed. Evidence brackets appearing later in the line (for example
+    [route=...], [matched-at=...], etc.) are preserved verbatim.
+    """
+    raw = (line or "").strip()
+    if not raw:
+        return raw
+
+    # Most common Nuclei form: [CVE-YYYY-NNNN] [protocol] [severity] evidence...
+    m = re.match(r'^\[(CVE-\d{4}-\d{4,7})\](.*)$', raw, re.I)
+    if m:
+        cve = m.group(1).upper()
+        rest = m.group(2).lstrip()
+    else:
+        # Also accept a CVE already written without brackets. This keeps the
+        # function idempotent and lets older grouped files pass through safely.
+        m = re.match(r'^(CVE-\d{4}-\d{4,7})\b(.*)$', raw, re.I)
+        if not m:
+            return raw
+        cve = m.group(1).upper()
+        rest = m.group(2).lstrip()
+
+    # Strip only consecutive metadata tokens at the START of the remaining
+    # text. Once real evidence begins (URL/path/text), all later brackets are
+    # left untouched. This intentionally preserves e.g. [route="..."].
+    while rest.startswith('['):
+        token = re.match(r'^\[([^]\r\n]+)\]\s*', rest)
+        if not token:
+            break
+
+        value = token.group(1).strip()
+        value_l = value.lower()
+
+        # Nuclei protocol/severity/template metadata commonly placed directly
+        # after the template/CVE id. Do not consume evidence-style key=value
+        # tokens, because those are useful in the report.
+        is_evidence = '=' in value or value_l.startswith(('route:', 'matched-at:', 'matcher-name:'))
+        if is_evidence:
+            break
+
+        rest = rest[token.end():].lstrip()
+
+    return f"{cve} {rest}".rstrip() if rest else cve
+
 NOISE_PATTERNS = re.compile(r'(mx-fingerprint|nameserver|spf-record)', re.I)
 PROXY_NOISE_PATTERNS = re.compile(
     r'(RewriteEngine|RewriteRule|ProxyPassMatch|ProxyPassReverse|ProxyPass|mod_proxy|re-inserted into the proxied request-target)',
@@ -665,7 +720,7 @@ def merge_cve_entries_per_host(entries: List[Dict[str, Any]]) -> Dict[str, Dict[
         if not host:
             host = "__unknown__"
         if host not in merged:
-            merged[host] = {'ips': [], 'services_list': [], 'cves': [], 'recs': []}
+            merged[host] = {'ips': [], 'services_list': [], 'cves': [], 'cve_details': [], 'recs': []}
         m = merged[host]
         ip = ent.get('ip') or ""
         if ip and ip not in m['ips']:
@@ -679,6 +734,9 @@ def merge_cve_entries_per_host(entries: List[Dict[str, Any]]) -> Dict[str, Dict[
         for c in (ent.get('cves') or []):
             if c not in m['cves']:
                 m['cves'].append(c)
+        for detail in (ent.get('cve_details') or []):
+            if detail and detail not in m['cve_details']:
+                m['cve_details'].append(detail)
         for r in (ent.get('recs') or []):
             if r not in m['recs']:
                 m['recs'].append(r)
@@ -918,43 +976,53 @@ def build_report_for_root(root: str,
             primary_ip = ips[0] if ips else ""
             services_norm = ent.get('services')
             cves = ent.get('cves', []) or []
+            cve_details = ent.get('cve_details', []) or []
             recs = ent.get('recs', []) or []
 
-            if host == main_host:
-                if primary_ip:
-                    lines.append(f"{root} (IP: {primary_ip})")
-                else:
-                    lines.append(f"{root}")
-                if services_norm:
-                    lines.append(f"Widoczne serwisy: {services_norm}")
-                if cves:
-                    lines.append("CVEs:")
-                    for c in cves:
-                        lines.append(f"\t{c}")
-                if recs:
-                    lines.append("Rekomendacje / uwagi:")
-                    for r in recs:
-                        r = r.replace(
-                            f"Szanowni Państwo,\n"
-                            f"w ramach analizy bezpieczeństwa teleinformatycznego w Państwa domenie {root} "
-                            "zidentyfikowaliśmy obiekty, których wersja lub konfiguracja posiada znane podatności.",
-                            ""
-                        )
-                        lines.append(f"\t {r}")
-                lines.append("")
+            # Every host/subdomain must be rendered. The previous implementation
+            # printed CVE/IP data only when host == root and silently omitted it
+            # for subdomains. Keep the same report structure for every host.
+            display_host = root if host == main_host else host
+            if primary_ip:
+                lines.append(f"IP: {primary_ip} ({display_host})")
             else:
-                lines.append("")
-                if recs:
-                    lines.append("\tRekomendacje / uwagi:")
-                    for r in recs:
-                        r = r.replace(
-                            f"Szanowni Państwo,\n"
-                            f"w ramach analizy bezpieczeństwa teleinformatycznego w Państwa domenie {root} "
-                            "zidentyfikowaliśmy obiekty, których wersja lub konfiguracja posiada znane podatności.",
-                            ""
-                        )
-                        lines.append(f"\t\t- {r}")
-                lines.append("")
+                lines.append(f"{display_host}")
+
+            if services_norm:
+                lines.append(f"Widoczne serwisy: {services_norm}")
+
+            if cves or cve_details:
+                lines.append("CVEs:")
+                # Prefer full original nuclei finding lines where available so
+                # URL, protocol, severity, route and other evidence are not lost.
+                emitted_ids = set()
+                for detail in cve_details:
+                    if not detail:
+                        continue
+                    formatted_detail = format_nuclei_cve_finding(detail)
+                    lines.append(f"\t{formatted_detail}")
+                    for cv in re.findall(r'\b(CVE-\d{4}-\d{4,7})\b', formatted_detail, re.I):
+                        emitted_ids.add(cv.upper())
+                # CVE-folder entries may have only IDs/descriptions and no raw
+                # nuclei line. Emit those IDs as a lossless fallback.
+                for c in cves:
+                    cid_match = re.search(r'\b(CVE-\d{4}-\d{4,7})\b', str(c), re.I)
+                    cid = cid_match.group(1).upper() if cid_match else str(c).upper()
+                    if cid not in emitted_ids:
+                        lines.append(f"\t{c}")
+                        emitted_ids.add(cid)
+
+            if recs:
+                lines.append("Rekomendacje / uwagi:")
+                for r in recs:
+                    r = r.replace(
+                        f"Szanowni Państwo,\n"
+                        f"w ramach analizy bezpieczeństwa teleinformatycznego w Państwa domenie {root} "
+                        "zidentyfikowaliśmy obiekty, których wersja lub konfiguracja posiada znane podatności.",
+                        ""
+                    )
+                    lines.append(f"\t {r}")
+            lines.append("")
         idx += 1
 
     lines.append("Jeżeli któreś z podatności nie dotyczą podmiotu, prosimy o informację zwrotną wraz z wyjaśnieniem.\n")
@@ -1196,12 +1264,29 @@ def main():
                     if (ent.get('host') or "").lower() == host and c in (ent.get('cves') or []):
                         exists = True
                         break
+                if exists:
+                    matching_raw = [
+                        ln for ln in (hinfo.get('raw_findings') or [])
+                        if re.search(rf'\b{re.escape(c)}\b', ln, re.I)
+                    ]
+                    for ent in cve_entries:
+                        if (ent.get('host') or "").lower() == host and c in (ent.get('cves') or []):
+                            ent.setdefault('cve_details', [])
+                            for detail in matching_raw:
+                                if detail not in ent['cve_details']:
+                                    ent['cve_details'].append(detail)
+                    continue
                 if not exists:
+                    matching_raw = [
+                        ln for ln in (hinfo.get('raw_findings') or [])
+                        if re.search(rf'\b{re.escape(c)}\b', ln, re.I)
+                    ]
                     cve_entries.append({
                         'ip': hinfo.get('ip'),
                         'host': host,
                         'services': ", ".join((hinfo.get('services') or {}).keys()),
                         'cves': [c],
+                        'cve_details': unique_preserve(matching_raw),
                         'recs': []
                     })
 
@@ -1337,12 +1422,29 @@ def main():
                     if (ent.get('host') or "").lower() == host and c in (ent.get('cves') or []):
                         exists = True
                         break
+                if exists:
+                    matching_raw = [
+                        ln for ln in (hinfo.get('raw_findings') or [])
+                        if re.search(rf'\b{re.escape(c)}\b', ln, re.I)
+                    ]
+                    for ent in cve_entries:
+                        if (ent.get('host') or "").lower() == host and c in (ent.get('cves') or []):
+                            ent.setdefault('cve_details', [])
+                            for detail in matching_raw:
+                                if detail not in ent['cve_details']:
+                                    ent['cve_details'].append(detail)
+                    continue
                 if not exists:
+                    matching_raw = [
+                        ln for ln in (hinfo.get('raw_findings') or [])
+                        if re.search(rf'\b{re.escape(c)}\b', ln, re.I)
+                    ]
                     cve_entries.append({
                         'ip': hinfo.get('ip'),
                         'host': host,
                         'services': ", ".join((hinfo.get('services') or {}).keys()),
                         'cves': [c],
+                        'cve_details': unique_preserve(matching_raw),
                         'recs': []
                     })
 

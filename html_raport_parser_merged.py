@@ -29,8 +29,12 @@ import re
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 # --- Vulnerability tokens (CVE + WordPress WAS-xxxx) ---
+# Accept both the final report form:
+#     CVE-2023-5561 (srednia, 5.3) https://...
+# and legacy/raw bracketed form:
+#     [CVE-2023-5561] [http] [medium] https://...
 VULN_TOKEN_RE = re.compile(r"\b((?:CVE-\d{4}-\d{4,7})|(?:WAS-\d{3,7}))\b", re.I)
-VULN_START_RE = re.compile(r"^\s*(?:CVE-\d{4}-\d{4,7}|WAS-\d{3,7})\b", re.I)
+VULN_START_RE = re.compile(r"^\s*\[?(?:CVE-\d{4}-\d{4,7}|WAS-\d{3,7})\]?(?=\s|\[|$)", re.I)
 
 # --- Compatibility: host (IP: x.x.x.x) header ---
 IP_IN_PARENS_LINE_RE = re.compile(r"^(.+?)\s*\(IP:\s*([\d\.]+)\s*\)$", re.I)

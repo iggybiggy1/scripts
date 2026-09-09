@@ -5067,35 +5067,35 @@ def add_presentation_dashboards(workbook_path: str, root_folder: str,
 
 def write_per_folder(path: str, detail_df, agg_df, config_df, config_detail_df, all_findings_df) -> None:
     with pd.ExcelWriter(path, engine="openpyxl") as w:
-        detail_df.to_excel(w, "CVE_stats_detailed", index=False)
-        agg_df.to_excel(w, "CVE_stats", index=False)
-        config_df.to_excel(w, "Config_Issues", index=False)
-        config_detail_df.to_excel(w, "Config_Detailed", index=False)
-        all_findings_df.to_excel(w, "All_Findings", index=False)
+        detail_df.to_excel(w, sheet_name="CVE_stats_detailed", index=False)
+        agg_df.to_excel(w, sheet_name="CVE_stats", index=False)
+        config_df.to_excel(w, sheet_name="Config_Issues", index=False)
+        config_detail_df.to_excel(w, sheet_name="Config_Detailed", index=False)
+        all_findings_df.to_excel(w, sheet_name="All_Findings", index=False)
 
 
 def write_combined(path: str, results, all_detail, all_stats, all_cfg, all_cfg_detail, all_findings, history_df) -> None:
     with pd.ExcelWriter(path, engine="openpyxl") as w:
         for folder, detail_df, agg_df, config_df, config_detail_df, all_findings_df in results:
-            detail_df.to_excel(w, safe_sheet_name(folder, "CVE_stats_detailed"), index=False)
-            agg_df.to_excel(w, safe_sheet_name(folder, "CVE_stats"), index=False)
-            config_df.to_excel(w, safe_sheet_name(folder, "Config_Issues"), index=False)
-            config_detail_df.to_excel(w, safe_sheet_name(folder, "Config_Detailed"), index=False)
-        all_detail.to_excel(w, "All_data_detailed", index=False)
-        all_stats.to_excel(w, "All_data", index=False)
-        all_cfg.to_excel(w, "Config_All_By_Folder", index=False)
-        all_cfg_detail.to_excel(w, "All_Config_Detailed", index=False)
-        all_findings.to_excel(w, "All_Findings_Detailed", index=False)
-        history_df.to_excel(w, "History", index=False)
+            detail_df.to_excel(w, sheet_name=safe_sheet_name(folder, "CVE_stats_detailed"), index=False)
+            agg_df.to_excel(w, sheet_name=safe_sheet_name(folder, "CVE_stats"), index=False)
+            config_df.to_excel(w, sheet_name=safe_sheet_name(folder, "Config_Issues"), index=False)
+            config_detail_df.to_excel(w, sheet_name=safe_sheet_name(folder, "Config_Detailed"), index=False)
+        all_detail.to_excel(w, sheet_name="All_data_detailed", index=False)
+        all_stats.to_excel(w, sheet_name="All_data", index=False)
+        all_cfg.to_excel(w, sheet_name="Config_All_By_Folder", index=False)
+        all_cfg_detail.to_excel(w, sheet_name="All_Config_Detailed", index=False)
+        all_findings.to_excel(w, sheet_name="All_Findings_Detailed", index=False)
+        history_df.to_excel(w, sheet_name="History", index=False)
 
 
 def write_diff(path_txt: str, path_xlsx: str, lines: List[str], cve_df: pd.DataFrame, cfg_df: pd.DataFrame, history_df: pd.DataFrame) -> None:
     with open(path_txt, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     with pd.ExcelWriter(path_xlsx, engine="openpyxl") as w:
-        cve_df.to_excel(w, "CVE_Folder_Changes", index=False)
-        cfg_df.to_excel(w, "Config_Changes", index=False)
-        history_df.to_excel(w, "History", index=False)
+        cve_df.to_excel(w, sheet_name="CVE_Folder_Changes", index=False)
+        cfg_df.to_excel(w, sheet_name="Config_Changes", index=False)
+        history_df.to_excel(w, sheet_name="History", index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -5265,17 +5265,17 @@ def main() -> None:
         # Combined workbook includes both legacy-friendly sheets and exhaustive detailed sheets.
         with pd.ExcelWriter(new_path, engine="openpyxl") as w:
             for folder, detail_df, agg_df, config_df, config_detail_df, all_findings_df in results:
-                detail_df.to_excel(w, safe_sheet_name(folder, "CVE_stats_detailed"), index=False)
-                agg_df.to_excel(w, safe_sheet_name(folder, "CVE_stats"), index=False)
-                config_df.to_excel(w, safe_sheet_name(folder, "Config_Issues"), index=False)
-                config_detail_df.to_excel(w, safe_sheet_name(folder, "Config_Detailed"), index=False)
-            all_detail.to_excel(w, "All_data_detailed", index=False)
-            all_stats.to_excel(w, "All_data", index=False)
-            konfig_all.to_excel(w, "Konfiguracyjne_all", index=False)
-            all_cfg_by_folder.to_excel(w, "Config_All_By_Folder", index=False)
-            all_cfg_detail.to_excel(w, "All_Config_Detailed", index=False)
-            all_findings.to_excel(w, "All_Findings_Detailed", index=False)
-            history_df.to_excel(w, "History", index=False)
+                detail_df.to_excel(w, sheet_name=safe_sheet_name(folder, "CVE_stats_detailed"), index=False)
+                agg_df.to_excel(w, sheet_name=safe_sheet_name(folder, "CVE_stats"), index=False)
+                config_df.to_excel(w, sheet_name=safe_sheet_name(folder, "Config_Issues"), index=False)
+                config_detail_df.to_excel(w, sheet_name=safe_sheet_name(folder, "Config_Detailed"), index=False)
+            all_detail.to_excel(w, sheet_name="All_data_detailed", index=False)
+            all_stats.to_excel(w, sheet_name="All_data", index=False)
+            konfig_all.to_excel(w, sheet_name="Konfiguracyjne_all", index=False)
+            all_cfg_by_folder.to_excel(w, sheet_name="Config_All_By_Folder", index=False)
+            all_cfg_detail.to_excel(w, sheet_name="All_Config_Detailed", index=False)
+            all_findings.to_excel(w, sheet_name="All_Findings_Detailed", index=False)
+            history_df.to_excel(w, sheet_name="History", index=False)
 
             # Audit trail: every historical findings workbook that contributed
             # to history/trend calculations, plus the current run.
@@ -5299,7 +5299,7 @@ def main() -> None:
             })
             pd.DataFrame(timeline_rows).to_excel(
                 w,
-                "Snapshot_Timeline",
+                sheet_name="Snapshot_Timeline",
                 index=False,
             )
 
